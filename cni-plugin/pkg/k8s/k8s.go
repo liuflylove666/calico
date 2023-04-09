@@ -23,13 +23,11 @@ import (
 	"os"
 	"strings"
 	"time"
-
+        "reflect"
 	"github.com/containernetworking/cni/pkg/skel"
 	cnitypes "github.com/containernetworking/cni/pkg/types"
-	cniv1 "github.com/containernetworking/cni/pkg/types/100"
+	"github.com/containernetworking/cni/pkg/types/current"
 	"github.com/containernetworking/plugins/pkg/ipam"
-
-	libipam "github.com/projectcalico/calico/libcalico-go/lib/ipam"
 
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,7 +36,6 @@ import (
 
 	libapi "github.com/projectcalico/calico/libcalico-go/lib/apis/v3"
 	k8sconversion "github.com/projectcalico/calico/libcalico-go/lib/backend/k8s/conversion"
-	k8sresources "github.com/projectcalico/calico/libcalico-go/lib/backend/k8s/resources"
 	calicoclient "github.com/projectcalico/calico/libcalico-go/lib/clientv3"
 	cerrors "github.com/projectcalico/calico/libcalico-go/lib/errors"
 	cnet "github.com/projectcalico/calico/libcalico-go/lib/net"
@@ -48,14 +45,23 @@ import (
 	"github.com/projectcalico/calico/cni-plugin/internal/pkg/utils/cri"
 	"github.com/projectcalico/calico/cni-plugin/pkg/dataplane"
 	"github.com/projectcalico/calico/cni-plugin/pkg/types"
+        coreV1 "k8s.io/api/core/v1"
+	libipam "github.com/projectcalico/calico/libcalico-go/lib/ipam"
 )
+
+type StaticIP struct {
+	// IP version, either "4" or "6"
+	Version string `json: version`
+	// Index into Result structs Interfaces list
+	Address string `json: address`
+}
 
 // CmdAddK8s performs the "ADD" operation on a kubernetes pod
 // Having kubernetes code in its own file avoids polluting the mainline code. It's expected that the kubernetes case will
 // more special casing than the mainline code.
-func CmdAddK8s(ctx context.Context, args *skel.CmdArgs, conf types.NetConf, epIDs utils.WEPIdentifiers, calicoClient calicoclient.Interface, endpoint *libapi.WorkloadEndpoint) (*cniv1.Result, error) {
+func CmdAddK8s(ctx context.Context, args *skel.CmdArgs, conf types.NetConf, epIDs utils.WEPIdentifiers, calicoClient calicoclient.Interface, endpoint *libapi.WorkloadEndpoint) (*current.Result, error) {
 	var err error
-	var result *cniv1.Result
+	var result *current.Result
 
 	utils.ConfigureLogging(conf)
 
@@ -108,24 +114,18 @@ func CmdAddK8s(ctx context.Context, args *skel.CmdArgs, conf types.NetConf, epID
 		}
 
 		// Defer to ReplaceHostLocalIPAMPodCIDRs to swap the "usePodCidr" value out.
-		var cachedPodCidrs []string
-		var cachedIpv4Cidr, cachedIpv6Cidr string
-		getRealPodCIDRs := func() (string, string, error) {
-			if len(cachedPodCidrs) == 0 {
+		var cachedPodCidr string
+		getRealPodCIDR := func() (string, error) {
+			if cachedPodCidr == "" {
 				var err error
-				var emptyResult string
-				cachedPodCidrs, err = getPodCidrs(client, conf, epIDs.Node)
+				cachedPodCidr, err = getPodCidr(client, conf, epIDs.Node)
 				if err != nil {
-					return emptyResult, emptyResult, err
-				}
-				cachedIpv4Cidr, cachedIpv6Cidr, err = getIPsByFamily(cachedPodCidrs)
-				if err != nil {
-					return emptyResult, emptyResult, err
+					return "", err
 				}
 			}
-			return cachedIpv4Cidr, cachedIpv6Cidr, nil
+			return cachedPodCidr, nil
 		}
-		err = utils.ReplaceHostLocalIPAMPodCIDRs(logger, stdinData, getRealPodCIDRs)
+		err = utils.ReplaceHostLocalIPAMPodCIDRs(logger, stdinData, getRealPodCIDR)
 		if err != nil {
 			return nil, err
 		}
@@ -189,6 +189,8 @@ func CmdAddK8s(ctx context.Context, args *skel.CmdArgs, conf types.NetConf, epID
 	var generateName string
 	var serviceAccount string
 
+        var isStatefulSet bool
+
 	// Only attempt to fetch the labels and annotations from Kubernetes
 	// if the policy type has been set to "k8s". This allows users to
 	// run the plugin under Kubernetes without needing it to access the
@@ -200,7 +202,7 @@ func CmdAddK8s(ctx context.Context, args *skel.CmdArgs, conf types.NetConf, epID
 		}
 		logger.WithField("NS Annotations", annotNS).Debug("Fetched K8s namespace annotations")
 
-		labels, annot, ports, profiles, generateName, serviceAccount, err = getK8sPodInfo(client, epIDs.Pod, epIDs.Namespace)
+		labels, annot, ports, profiles, generateName, serviceAccount, isStatefulSet, err = getK8sPodInfo(client, epIDs.Pod, epIDs.Namespace)
 		if err != nil {
 			return nil, err
 		}
@@ -271,11 +273,66 @@ func CmdAddK8s(ctx context.Context, args *skel.CmdArgs, conf types.NetConf, epID
 		}
 	}
 
+        ipAddrsStaticIp := ""
+	if isStatefulSet {
+		var data []StaticIP
+		data1, _ := getK8sConfigMapInfo(client, epIDs.Pod, epIDs.Namespace)
+		logger.Debug("get data1 configmapInfo111:", data1)
+		err := json.Unmarshal([]byte(data1), &data)
+		if err != nil {
+			logger.Debug("json Unmarshal11111:%+v", err)
+		}
+		var data2 []string
+		for _, item := range data {
+			data2 = append(data2, strings.Split(item.Address,"/")[0])
+		}
+		jsonString, err := json.Marshal(data2)
+		if err != nil {
+			logger.Debug("json Unmarshal11111 err:%+v", err)
+		}
+		ipAddrsStaticIp = string(jsonString)
+		logger.Debug("ipAddrsStaticIp111:", ipAddrsStaticIp)
+	}
+
+
+        logger.Debug("ipAddrsStaticIp2222:", ipAddrsStaticIp)
+        
 	ipAddrsNoIpam := annot["cni.projectcalico.org/ipAddrsNoIpam"]
 	ipAddrs := annot["cni.projectcalico.org/ipAddrs"]
 
+
+
 	// Switch based on which annotations are passed or not passed.
 	switch {
+        case ipAddrsStaticIp != "":
+                logger.Debug("IPAM222222 result set static ip to: %+v", ipAddrsStaticIp)
+                // Validate that we're allowed to use this feature.
+                if conf.IPAM.Type != "calico-ipam" {
+                        e := fmt.Errorf("ipAddrsStaticIp is not compatible with configured IPAM: %s", conf.IPAM.Type)
+                        logger.Error(e)
+                        return nil, e
+                }
+
+                // If the endpoint already exists, we need to attempt to release the previous IP addresses here
+                // since the ADD call will fail when it tries to reallocate the same IPs. releaseIPAddrs assumes
+                // that Calico IPAM is in use, which is OK here since only Calico IPAM supports the ipAddrs
+                // annotation.
+                logger.Debug("IPAM222222 result set static ip to: %+v", ipAddrsStaticIp)
+                if endpoint != nil {
+                        logger.Info("Endpoint already exists and ipAddrsStaticIp is set. Release any old IPs")
+                        if err := releaseIPAddrs(endpoint.Spec.IPNetworks, calicoClient, logger); err != nil {
+                                return nil, fmt.Errorf("failed to release ipAddrsStaticIp: %s", err)
+                        }
+                }
+
+                // When ipAddrs annotation is set, we call out to the configured IPAM plugin
+                // requesting the specific IP addresses included in the annotation.
+                logger.Debug("IPAM222222 result set static ip to: %+v", ipAddrsStaticIp)
+                result, err = ipAddrsResult(ipAddrsStaticIp, conf, args, logger)
+                if err != nil {
+                        return nil, err
+                }
+                logger.Debugf("IPAM result set to: %+v", result)
 	case ipAddrs == "" && ipAddrsNoIpam == "":
 		// Call the IPAM plugin.
 		result, err = utils.AddIPAM(conf, args, logger)
@@ -311,7 +368,7 @@ func CmdAddK8s(ctx context.Context, args *skel.CmdArgs, conf types.NetConf, epID
 
 		// Convert overridden IPAM result into current Result.
 		// This method fill in all the empty fields necessory for CNI output according to spec.
-		result, err = cniv1.NewResultFromResult(overriddenResult)
+		result, err = current.NewResultFromResult(overriddenResult)
 		if err != nil {
 			return nil, err
 		}
@@ -346,7 +403,8 @@ func CmdAddK8s(ctx context.Context, args *skel.CmdArgs, conf types.NetConf, epID
 			return nil, err
 		}
 		logger.Debugf("IPAM result set to: %+v", result)
-	}
+
+        }
 
 	// Configure the endpoint (creating if required).
 	if endpoint == nil {
@@ -477,11 +535,7 @@ func CmdAddK8s(ctx context.Context, args *skel.CmdArgs, conf types.NetConf, epID
 	}
 
 	// Write the endpoint object (either the newly created one, or the updated one)
-	// Pass special-case flag through to KDD to let it know what kind of patch to apply to the underlying
-	// Pod resource. (In Enterprise) Felix also modifies the pod through a patch and setting this avoids patching the
-	// same fields as Felix so that we can't clobber Felix's updates.
-	ctxPatchCNI := k8sresources.ContextWithPatchMode(ctx, k8sresources.PatchModeCNI)
-	if _, err := utils.CreateOrUpdate(ctxPatchCNI, calicoClient, endpoint); err != nil {
+	if _, err := utils.CreateOrUpdate(ctx, calicoClient, endpoint); err != nil {
 		logger.WithError(err).Error("Error creating/updating endpoint in datastore.")
 		releaseIPAM()
 		return nil, err
@@ -489,7 +543,7 @@ func CmdAddK8s(ctx context.Context, args *skel.CmdArgs, conf types.NetConf, epID
 	logger.Info("Wrote updated endpoint to datastore")
 
 	// Add the interface created above to the CNI result.
-	result.Interfaces = append(result.Interfaces, &cniv1.Interface{
+	result.Interfaces = append(result.Interfaces, &current.Interface{
 		Name: endpoint.Spec.InterfaceName},
 	)
 
@@ -601,7 +655,7 @@ func releaseIPAddrs(ipAddrs []string, calico calicoclient.Interface, logger *log
 		if err != nil {
 			return err
 		}
-		unallocated, err := calico.IPAM().ReleaseIPs(context.Background(), libipam.ReleaseOptions{Address: cip.String()})
+		unallocated, err := calico.IPAM().ReleaseIPs(context.Background(), []cnet.IP{*cip})
 		if err != nil {
 			log.WithError(err).Error("Failed to release explicit IP")
 			return err
@@ -618,7 +672,7 @@ func releaseIPAddrs(ipAddrs []string, calico calicoclient.Interface, logger *log
 // ipAddrsResult parses the ipAddrs annotation and calls the configured IPAM plugin for
 // each IP passed to it by setting the IP field in CNI_ARGS, and returns the result of calling the IPAM plugin.
 // Example annotation value string: "[\"10.0.0.1\", \"2001:db8::1\"]"
-func ipAddrsResult(ipAddrs string, conf types.NetConf, args *skel.CmdArgs, logger *logrus.Entry) (*cniv1.Result, error) {
+func ipAddrsResult(ipAddrs string, conf types.NetConf, args *skel.CmdArgs, logger *logrus.Entry) (*current.Result, error) {
 	logger.Infof("Parsing annotation \"cni.projectcalico.org/ipAddrs\":%s", ipAddrs)
 
 	// We need to make sure there is only one IPv4 and/or one IPv6
@@ -628,9 +682,7 @@ func ipAddrsResult(ipAddrs string, conf types.NetConf, args *skel.CmdArgs, logge
 		return nil, err
 	}
 
-	result := cniv1.Result{
-		CNIVersion: cniv1.ImplementedSpecVersion,
-	}
+	result := current.Result{}
 
 	// Go through all the IPs passed in as annotation value and call IPAM plugin
 	// for each, and populate the result variable with IP4 and/or IP6 IPs returned
@@ -643,11 +695,7 @@ func ipAddrsResult(ipAddrs string, conf types.NetConf, args *skel.CmdArgs, logge
 		}
 
 		result.IPs = append(result.IPs, r.IPs[0])
-		version := "6"
-		if r.IPs[0].Address.IP.To4() != nil {
-			version = "4"
-		}
-		logger.Debugf("Adding IPv%s: %s to result", version, ip.String())
+		logger.Debugf("Adding IPv%s: %s to result", r.IPs[0].Version, ip.String())
 	}
 
 	return &result, nil
@@ -656,7 +704,7 @@ func ipAddrsResult(ipAddrs string, conf types.NetConf, args *skel.CmdArgs, logge
 // callIPAMWithIP sets CNI_ARGS with the IP and calls the IPAM plugin with it
 // to get current.Result and then it unsets the IP field from CNI_ARGS ENV var,
 // so it doesn't pollute the subsequent requests.
-func callIPAMWithIP(ip net.IP, conf types.NetConf, args *skel.CmdArgs, logger *logrus.Entry) (*cniv1.Result, error) {
+func callIPAMWithIP(ip net.IP, conf types.NetConf, args *skel.CmdArgs, logger *logrus.Entry) (*current.Result, error) {
 
 	// Save the original value of the CNI_ARGS ENV var for backup.
 	originalArgs := os.Getenv("CNI_ARGS")
@@ -712,7 +760,7 @@ func callIPAMWithIP(ip net.IP, conf types.NetConf, args *skel.CmdArgs, logger *l
 	// IPAM result has a bunch of fields that are optional for an IPAM plugin
 	// but required for a CNI plugin, so this is to populate those fields.
 	// See CNI Spec doc for more details.
-	ipamResult, err := cniv1.NewResultFromResult(r)
+	ipamResult, err := current.NewResultFromResult(r)
 	if err != nil {
 		return nil, err
 	}
@@ -727,7 +775,7 @@ func callIPAMWithIP(ip net.IP, conf types.NetConf, args *skel.CmdArgs, logger *l
 // overrideIPAMResult generates current.Result like the one produced by IPAM plugin,
 // but sets IP field manually since IPAM is bypassed with this annotation.
 // Example annotation value string: "[\"10.0.0.1\", \"2001:db8::1\"]"
-func overrideIPAMResult(ipAddrsNoIpam string, logger *logrus.Entry) (*cniv1.Result, error) {
+func overrideIPAMResult(ipAddrsNoIpam string, logger *logrus.Entry) (*current.Result, error) {
 	logger.Infof("Parsing annotation \"cni.projectcalico.org/ipAddrsNoIpam\":%s", ipAddrsNoIpam)
 
 	// We need to make sure there is only one IPv4 and/or one IPv6
@@ -737,9 +785,7 @@ func overrideIPAMResult(ipAddrsNoIpam string, logger *logrus.Entry) (*cniv1.Resu
 		return nil, err
 	}
 
-	result := cniv1.Result{
-		CNIVersion: cniv1.ImplementedSpecVersion,
-	}
+	result := current.Result{}
 
 	// Go through all the IPs passed in as annotation value and populate
 	// the result variable with IP4 and/or IP6 IPs.
@@ -756,14 +802,15 @@ func overrideIPAMResult(ipAddrsNoIpam string, logger *logrus.Entry) (*cniv1.Resu
 			mask = net.CIDRMask(128, 128)
 		}
 
-		ipConf := &cniv1.IPConfig{
+		ipConf := &current.IPConfig{
+			Version: version,
 			Address: net.IPNet{
 				IP:   ip,
 				Mask: mask,
 			},
 		}
 		result.IPs = append(result.IPs, ipConf)
-		logger.Debugf("Adding IPv%s: %s to result", version, ip.String())
+		logger.Debugf("Adding IPv%s: %s to result", ipConf.Version, ip.String())
 	}
 
 	return &result, nil
@@ -844,7 +891,7 @@ func NewK8sClient(conf types.NetConf, logger *logrus.Entry) (*kubernetes.Clients
 	// so split that off to ensure compatibility.
 	conf.Policy.K8sAPIRoot = strings.Split(conf.Policy.K8sAPIRoot, "/api/")[0]
 
-	overridesMap := []struct {
+	var overridesMap = []struct {
 		variable *string
 		value    string
 	}{
@@ -888,17 +935,17 @@ func getK8sNSInfo(client *kubernetes.Clientset, podNamespace string) (annotation
 	return ns.Annotations, nil
 }
 
-func getK8sPodInfo(client *kubernetes.Clientset, podName, podNamespace string) (labels map[string]string, annotations map[string]string, ports []libapi.WorkloadEndpointPort, profiles []string, generateName, serviceAccount string, err error) {
+func getK8sPodInfo(client *kubernetes.Clientset, podName, podNamespace string) (labels map[string]string, annotations map[string]string, ports []libapi.WorkloadEndpointPort, profiles []string, generateName, serviceAccount string, isStatefulSet bool, err error) {
 	pod, err := client.CoreV1().Pods(string(podNamespace)).Get(context.Background(), podName, metav1.GetOptions{})
 	logrus.Debugf("pod info %+v", pod)
 	if err != nil {
-		return nil, nil, nil, nil, "", "", err
+		return nil, nil, nil, nil, "", "", false, err
 	}
 
 	c := k8sconversion.NewConverter()
 	kvps, err := c.PodToWorkloadEndpoints(pod)
 	if err != nil {
-		return nil, nil, nil, nil, "", "", err
+		return nil, nil, nil, nil, "", "", false, err
 	}
 
 	kvp := kvps[0]
@@ -908,12 +955,21 @@ func getK8sPodInfo(client *kubernetes.Clientset, podName, podNamespace string) (
 	generateName = kvp.Value.(*libapi.WorkloadEndpoint).GenerateName
 	serviceAccount = kvp.Value.(*libapi.WorkloadEndpoint).Spec.ServiceAccountName
 
-	return labels, pod.Annotations, ports, profiles, generateName, serviceAccount, nil
+	isStatefulSet = false
+        logrus.Debugf("pod kind111 %+v", pod.ObjectMeta.OwnerReferences)
+	for _, ownerRef := range pod.ObjectMeta.OwnerReferences {
+                logrus.Debugf("pod kind222 %+v", ownerRef.Kind)
+		if ownerRef.Kind == "StatefulSet" {
+			// statefulSetName = ownerRef.Name
+			isStatefulSet = true
+			break
+		}
+	}
+
+	return labels, pod.Annotations, ports, profiles, generateName, serviceAccount, isStatefulSet, nil
 }
 
-// getPodCidrs returns the podCidrs included in the node manifest
-func getPodCidrs(client *kubernetes.Clientset, conf types.NetConf, nodename string) ([]string, error) {
-	var emptyString []string
+func getPodCidr(client *kubernetes.Clientset, conf types.NetConf, nodename string) (string, error) {
 	// Pull the node name out of the config if it's set. Defaults to nodename
 	if conf.Kubernetes.NodeName != "" {
 		nodename = conf.Kubernetes.NodeName
@@ -921,34 +977,92 @@ func getPodCidrs(client *kubernetes.Clientset, conf types.NetConf, nodename stri
 
 	node, err := client.CoreV1().Nodes().Get(context.Background(), nodename, metav1.GetOptions{})
 	if err != nil {
-		return emptyString, err
+		return "", err
 	}
-	if len(node.Spec.PodCIDRs) == 0 {
-		return emptyString, fmt.Errorf("no podCidr for node %s", nodename)
+
+	if node.Spec.PodCIDR == "" {
+		return "", fmt.Errorf("no podCidr for node %s", nodename)
 	}
-	return node.Spec.PodCIDRs, nil
+	return node.Spec.PodCIDR, nil
 }
 
-// getIPsByFamily returns the IPv4 and IPv6 CIDRs
-func getIPsByFamily(cidrs []string) (string, string, error) {
-	var ipv4Cidr, ipv6Cidr string
-	for _, cidr := range cidrs {
-		_, ipNet, err := cnet.ParseCIDR(cidr)
+// getK8sConfigMapInfo
+func getK8sConfigMapInfo(client *kubernetes.Clientset, podName, podNamespace string) (datamap string, err error) {
+	configmap, err := client.CoreV1().ConfigMaps(string(podNamespace)).Get(context.Background(), podName, metav1.GetOptions{})
+	logrus.Debugf("configmap info %+v", configmap)
+	if err != nil {
+	    return "", err
+	}
+
+	datamap, ok := configmap.Data["ips.json"]
+	if !ok {
+		logrus.Debugf("Failed to get configmap %+v", err)
+		return "", err
+	}
+	logrus.Debugf("get1111 configmap data:%+v", reflect.TypeOf(datamap))
+	logrus.Debugf("get1111 configmap data:%+v", datamap)
+
+        // staticips := make([]*StaticIP, 0)
+	//err = json.Unmarshal([]byte(datamap), &staticips)
+	//if err != nil {
+	//      logrus.Errorf("configmap info ips err:%v", err)
+	//}
+
+	//return staticips, nil
+	return datamap, nil
+}
+
+func createK8sConfigMapInfo(client *kubernetes.Clientset, podName string, podNamespace string, dataInfo string) (configMapInfo *coreV1.ConfigMap, err error) {
+	configMap := &coreV1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: podName,
+		},
+		Data: map[string]string{
+			"ips.json": dataInfo,
+		},
+	}
+	ips, err := getK8sConfigMapInfo(client, podName, podNamespace)
+	if ips == "" {
+		configMapInfo2, err := client.CoreV1().ConfigMaps(podNamespace).Create(context.Background(), configMap, metav1.CreateOptions{})
+		logrus.Debugf("save to configmap info %+v", configMapInfo2)
 		if err != nil {
-			return "", "", err
+			return configMapInfo2, err
 		}
-		if ipNet.Version() == 4 {
-			ipv4Cidr = cidr
-		}
-
-		if ipNet.Version() == 6 {
-			ipv6Cidr = cidr
-		}
+	} else {
+		logrus.Debugf("ip地址已存在无需存储 %+v", ips)
+		return nil, err
 	}
 
-	if (len(cidrs) > 1) && (ipv4Cidr == "" || ipv6Cidr == "") {
-		return "", "", errors.New("ClusterCIDR contains two ranges of the same type")
+	return nil, nil
+}
+
+func CmdAddK8sConfigMap(conf types.NetConf, args libipam.AutoAssignArgs, dataInfo string, logger *logrus.Entry) (configMapInfo *coreV1.ConfigMap, err error) {
+        logger.Debugf("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	attrs := args.Attrs
+
+	// utils.ConfigureLogging(conf)
+
+	// logger := logrus.WithFields(logrus.Fields{})
+
+	// Allocate the IP and update/create the endpoint. Do this even if the endpoint already exists and has an IP
+	// allocation. The kubelet will send a DEL call for any old containers and we'll clean up the old IPs then.
+	client, err := NewK8sClient(conf, logger)
+	if err != nil {
+                logger.WithField("err", err).Debug("client erraaaaaaaaa")
+		return nil, err
+	}
+	// logger.WithField("client", client).Debug("Created Kubernetes client11111")
+
+        logger.Debugf("Created Kubernetes client11111")
+	if conf.Policy.PolicyType == "k8s" {
+		cm, err := createK8sConfigMapInfo(client, attrs[libipam.AttributePod], attrs[libipam.AttributeNamespace], dataInfo)
+		if err != nil {
+                        logger.WithField("err", err).Debug("configmap erraaaaaaaaa")
+			return nil, err
+		}
+		return cm, nil
+		logger.WithField("CmdAddK8sConfigMap", cm).Debug("CmdAddK8sConfigMap")
 	}
 
-	return ipv4Cidr, ipv6Cidr, nil
+	return nil, nil
 }
