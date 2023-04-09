@@ -26,7 +26,7 @@ data:
       "plugins": [
         {
           "type": "calico",
-          "log_level": "info",
+          "log_level": "debug",
           "log_file_path": "/var/log/calico/cni/cni.log",
           "datastore_type": "kubernetes",
           "nodename": "__KUBERNETES_NODE_NAME__",
@@ -3926,6 +3926,7 @@ rules:
       - configmaps
     verbs:
       - get
+      - create
   - apiGroups: [""]
     resources:
       - nodes/status
@@ -4028,6 +4029,8 @@ rules:
       - ipamconfigs
     verbs:
       - get
+      - create
+      - update
   # Block affinities must also be watchable by confd for route aggregation.
   - apiGroups: ["crd.projectcalico.org"]
     resources:
@@ -4103,7 +4106,8 @@ spec:
         # It can be deleted if this is a fresh installation, or if you have already
         # upgraded to use calico-ipam.
         - name: upgrade-ipam
-          image: docker.io/calico/cni:v3.21.6
+          #image: docker.io/calico/cni:v3.21.6
+          image: calico/cni:latest-amd64 
           command: ["/opt/cni/bin/calico-ipam", "-upgrade"]
           envFrom:
           - configMapRef:
@@ -4130,7 +4134,8 @@ spec:
         # This container installs the CNI binaries
         # and CNI network config file on each node.
         - name: install-cni
-          image: docker.io/calico/cni:v3.21.6
+          #image: docker.io/calico/cni:v3.21.6
+          image: calico/cni:latest-amd64 
           command: ["/opt/cni/bin/install"]
           envFrom:
           - configMapRef:
@@ -4182,7 +4187,8 @@ spec:
         # container programs network policy and routes on each
         # host.
         - name: calico-node
-          image: docker.io/calico/node:v3.21.6
+          #image: docker.io/calico/node:v3.21.6
+          image: calico/node:latest-amd64 
           envFrom:
           - configMapRef:
               # Allow KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT to be overridden for eBPF mode.
