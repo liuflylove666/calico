@@ -340,18 +340,19 @@ func cmdAdd(args *skel.CmdArgs) error {
 				Address: ipV6Network,
 			})
 		}
-		logger.WithFields(logrus.Fields{"result.IPs": r.IPs}).Debug("IPAM Result111111")
-		// save v4ips and v6ips to configmap
-		bytesIps, err := json.Marshal(r.IPs)
+
+		// save v4ips and v6ips data info to  k8s configmap
+                logger.Debugf("Save to CmdAddK8sConfigMap:11111R:%+v", r)
+		bytesIps, err := json.Marshal(r)
+                logger.Debugf("Save to CmdAddK8sConfigMap:11111String bytesIps:%+v", string(bytesIps))
 
                 if err !=nil {
-                       logger.WithFields(logrus.Fields{"result.IPs": r.IPs}).Debug("IPAM Result to Json err:%+v", err)
+                       logger.WithFields(logrus.Fields{"result": r}).Debug("IPAM Result to Json err:%+v", err)
                 }                
-
 		if cm, err := k8s.CmdAddK8sConfigMap(conf, assignArgs, string(bytesIps), logger); err != nil {
-                       logger.Debugf("CmdAddK8sConfigMap11111:%+v:%+v", cm,err)
+                       logger.Debugf("Save to CmdAddK8sConfigMap:11111:%+v:%+v", cm,err)
 		}
-		//end
+		//end add
 
 		logger.WithFields(logrus.Fields{"result.IPs": r.IPs}).Debug("IPAM Result")
 	}
