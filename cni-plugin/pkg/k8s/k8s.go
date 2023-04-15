@@ -23,7 +23,7 @@ import (
 	"os"
 	"strings"
 	"time"
-        "reflect"
+
 	"github.com/containernetworking/cni/pkg/skel"
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/pkg/types/current"
@@ -45,10 +45,11 @@ import (
 	"github.com/projectcalico/calico/cni-plugin/internal/pkg/utils/cri"
 	"github.com/projectcalico/calico/cni-plugin/pkg/dataplane"
 	"github.com/projectcalico/calico/cni-plugin/pkg/types"
-        coreV1 "k8s.io/api/core/v1"
 	libipam "github.com/projectcalico/calico/libcalico-go/lib/ipam"
+	coreV1 "k8s.io/api/core/v1"
 )
 
+var configmapName = "cm-staticip"
 
 // CmdAddK8s performs the "ADD" operation on a kubernetes pod
 // Having kubernetes code in its own file avoids polluting the mainline code. It's expected that the kubernetes case will
@@ -183,7 +184,7 @@ func CmdAddK8s(ctx context.Context, args *skel.CmdArgs, conf types.NetConf, epID
 	var generateName string
 	var serviceAccount string
 
-        var isStatefulSet bool
+	var isStatefulSet bool
 
 	// Only attempt to fetch the labels and annotations from Kubernetes
 	// if the policy type has been set to "k8s". This allows users to
@@ -266,66 +267,67 @@ func CmdAddK8s(ctx context.Context, args *skel.CmdArgs, conf types.NetConf, epID
 			}
 		}
 	}
-       
-        // add get configmap data
+
+	// add get configmap data
 	hasIP := false
-        data1 := &current.Result{}
-        if isStatefulSet {
-		data, _ := getK8sConfigMapInfo(client, epIDs.Pod, epIDs.Namespace)
-		logger.Debug("get data configmapInfo111:", data)
-	        if data != nil {
-	        	if data.IPs != nil{
-                                data1 = data
-				hasIP=true
-			        var ipList []net.IP
-			        for _, ip := range data.IPs{
-			            ipList = append(ipList, ip.Address.IP)
-			        }
-			        ipAddrsStr, err := json.Marshal(ipList)
-			        logger.Debugf("IPs parsed: %v", string(ipAddrsStr))
-			
+	data1 := &current.Result{}
+	if isStatefulSet {
+		cm, _ := getK8sConfigMapInfo(client, epIDs.Pod, epIDs.Namespace)
+		if cm != nil {
+			datamap, ok := cm.Data[epIDs.Pod]
+			if !ok {
+				logrus.Debugf("Failed to get configmap %+v", err)
+			} else {
+				r1 := &current.Result{}
+				err = json.Unmarshal([]byte(datamap), &r1)
 				if err != nil {
-					logger.Debug("json Marshall11111 err:%+v", err)
+					logrus.Errorf("get1111 configmap data:%+v", datamap)
+				}
+				if r1 != nil {
+					if r1.IPs != nil {
+						data1 = r1
+						hasIP = true
+						logrus.Debugf("result info r1111111:%+v", r1)
+					}
 				}
 			}
-	        }
-        }
-        
+	
+		}
+	}
+
 	ipAddrsNoIpam := annot["cni.projectcalico.org/ipAddrsNoIpam"]
 	ipAddrs := annot["cni.projectcalico.org/ipAddrs"]
 
-
-
 	// Switch based on which annotations are passed or not passed.
 	switch {
-        case hasIP:
-                // Validate that we're allowed to use this feature.
-                if conf.IPAM.Type != "calico-ipam" {
-                        e := fmt.Errorf("ipAddrsStaticIp is not compatible with configured IPAM: %s", conf.IPAM.Type)
-                        logger.Error(e)
-                        return nil, e
-                }
+	case hasIP:
+		// Validate that we're allowed to use this feature.
+		if conf.IPAM.Type != "calico-ipam" {
+			e := fmt.Errorf("ipAddrsStaticIp is not compatible with configured IPAM: %s", conf.IPAM.Type)
+			logger.Error(e)
+			return nil, e
+		}
 
-                // If the endpoint already exists, we need to attempt to release the previous IP addresses here
-                // since the ADD call will fail when it tries to reallocate the same IPs. releaseIPAddrs assumes
-                // that Calico IPAM is in use, which is OK here since only Calico IPAM supports the ipAddrs
-                // annotation.
-                if endpoint != nil {
-                        logger.Info("Endpoint already exists and ipAddrsStaticIp is set. Release any old IPs")
-                        if err := releaseIPAddrs(endpoint.Spec.IPNetworks, calicoClient, logger); err != nil {
-                                return nil, fmt.Errorf("failed to release ipAddrsStaticIp: %s", err)
-                        }
-                }
+		// If the endpoint already exists, we need to attempt to release the previous IP addresses here
+		// since the ADD call will fail when it tries to reallocate the same IPs. releaseIPAddrs assumes
+		// that Calico IPAM is in use, which is OK here since only Calico IPAM supports the ipAddrs
+		// annotation.
+		if endpoint != nil {
+			logger.Info("Endpoint already exists and ipAddrsStaticIp is set. Release any old IPs")
+			if err := releaseIPAddrs(endpoint.Spec.IPNetworks, calicoClient, logger); err != nil {
+				return nil, fmt.Errorf("failed to release ipAddrsStaticIp: %s", err)
+			}
+		}
 
-                // When ipAddrs annotation is set, we call out to the configured IPAM plugin
-                // requesting the specific IP addresses included in the annotation.
-                logger.Debug("IPAM222222 result set static ip to: %+v", data1)
-                // result, err = ipAddrsResult(ipAddrsStaticIp, conf, args, logger)
-                result = data1 
-                if err != nil {
-                        return nil, err
-                }
-                logger.Debugf("IPAM result set to: %+v", result)
+		// When ipAddrs annotation is set, we call out to the configured IPAM plugin
+		// requesting the specific IP addresses included in the annotation.
+		logger.Debugf("IPAM222222 result set static ip to: %+v", data1)
+		// result, err = ipAddrsResult(ipAddrsStaticIp, conf, args, logger)
+		result = data1
+		if err != nil {
+			return nil, err
+		}
+		logger.Debugf("IPAM23333 result set to: %+v", result)
 	case ipAddrs == "" && ipAddrsNoIpam == "":
 		// Call the IPAM plugin.
 		result, err = utils.AddIPAM(conf, args, logger)
@@ -397,7 +399,7 @@ func CmdAddK8s(ctx context.Context, args *skel.CmdArgs, conf types.NetConf, epID
 		}
 		logger.Debugf("IPAM result set to: %+v", result)
 
-        }
+	}
 
 	// Configure the endpoint (creating if required).
 	if endpoint == nil {
@@ -949,9 +951,9 @@ func getK8sPodInfo(client *kubernetes.Clientset, podName, podNamespace string) (
 	serviceAccount = kvp.Value.(*libapi.WorkloadEndpoint).Spec.ServiceAccountName
 
 	isStatefulSet = false
-        logrus.Debugf("pod kind111 %+v", pod.ObjectMeta.OwnerReferences)
+	logrus.Debugf("pod kind111 %+v", pod.ObjectMeta.OwnerReferences)
 	for _, ownerRef := range pod.ObjectMeta.OwnerReferences {
-                logrus.Debugf("pod kind222 %+v", ownerRef.Kind)
+		logrus.Debugf("pod kind222 %+v", ownerRef.Kind)
 		if ownerRef.Kind == "StatefulSet" {
 			// statefulSetName = ownerRef.Name
 			isStatefulSet = true
@@ -980,74 +982,91 @@ func getPodCidr(client *kubernetes.Clientset, conf types.NetConf, nodename strin
 }
 
 // getK8sConfigMapInfo
-func getK8sConfigMapInfo(client *kubernetes.Clientset, podName, podNamespace string) (data *current.Result, err error) {
-	configmap, err := client.CoreV1().ConfigMaps(string(podNamespace)).Get(context.Background(), podName, metav1.GetOptions{})
-	logrus.Debugf("configmap info %+v", configmap)
+func getK8sConfigMapInfo(client *kubernetes.Clientset, podName, podNamespace string) (configmapInfo2 *coreV1.ConfigMap, err error) {
+	configmapInfo, err := client.CoreV1().ConfigMaps(string(podNamespace)).Get(context.Background(), configmapName, metav1.GetOptions{})
 	if err != nil {
-	    return nil, err
-	}
-
-	datamap, ok := configmap.Data["ips.json"]
-	if !ok {
-		logrus.Debugf("Failed to get configmap %+v", err)
 		return nil, err
 	}
-	logrus.Debugf("get1111 configmap data:%+v", reflect.TypeOf(datamap))
-	logrus.Debugf("get1111 configmap data:%+v", datamap)
-
-	r1 := &current.Result{}
-	err = json.Unmarshal([]byte(datamap), &r1)
-	if err != nil {
-	        logrus.Errorf("get1111 configmap data:%+v", datamap)
+	if configmapInfo == nil {
+		return nil, err
 	}
-	return r1, nil
-
+	logrus.Debugf("configmap info %+v", configmapInfo)
+	return configmapInfo, err
 }
 
 func createK8sConfigMapInfo(client *kubernetes.Clientset, podName string, podNamespace string, dataInfo string) (configMapInfo *coreV1.ConfigMap, err error) {
 	configMap := &coreV1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: podName,
+			Name: configmapName,
 		},
 		Data: map[string]string{
-			"ips.json": dataInfo,
+			podName: dataInfo,
 		},
 	}
-	res, err := getK8sConfigMapInfo(client, podName, podNamespace)
-	if res == nil {
-		cm, err := client.CoreV1().ConfigMaps(podNamespace).Create(context.Background(), configMap, metav1.CreateOptions{})
-		logrus.Debugf("save to configmap info %+v", cm)
+	cm, err := getK8sConfigMapInfo(client, podName, podNamespace)
+	if cm == nil {
+		configMapInfo, err := client.CoreV1().ConfigMaps(podNamespace).Create(context.Background(), configMap, metav1.CreateOptions{})
+		logrus.Debugf("save to configmap info1122 %+v", configMapInfo)
 		if err != nil {
-			return cm, err
+			return configMapInfo, err
 		}
+		return configMapInfo, nil
 	} else {
-		logrus.Debugf("ip地址已存在无需存储 %+v", res.IPs)
+		dataInfoOld := cm.Data[podName]
+		if dataInfoOld == "" {
+			cm.Data[podName] = dataInfo
+		}
+		configMapInfo, err = client.CoreV1().ConfigMaps(podNamespace).Update(context.Background(), cm, metav1.UpdateOptions{})
+		logrus.Debugf("update to configmap info111 %+v", configMapInfo)
+		return configMapInfo, nil
+	}
+	logrus.Debugf("update to configmap infocm %+v", configMapInfo)
+	return cm, nil
+}
+
+func applyK8sConfigMap(client *kubernetes.Clientset, podName string, podNamespace string, dataInfo string) (configmapInfo2 *coreV1.ConfigMap, err error) {
+
+	configmapInfo, err := getK8sConfigMapInfo(client, podName, podNamespace)
+	if err != nil {
+		logrus.Debugf("configmap info nil")
 		return nil, err
 	}
-
-	return nil, nil
+	datamap, ok := configmapInfo.Data[podName]
+	if ok {
+		if datamap == "" {
+			configmapInfo.Data[podName] = dataInfo
+			cm2, err2 := client.CoreV1().ConfigMaps(podNamespace).Update(context.Background(), configmapInfo, metav1.UpdateOptions{})
+			logrus.Debugf("更新后cm2 %+v ,err2:%v\n", cm2, err2)
+			if err2 != nil {
+				return configmapInfo, err
+			}
+			return configmapInfo, nil
+		} else {
+			logrus.Debugf("获取datamap失败")
+			return configmapInfo, err
+		}
+	} else {
+		logrus.Debugf("ip地址已存在无需存储 %+v", configmapInfo)
+		return configmapInfo, err
+	}
 }
 
 func CmdAddK8sConfigMap(conf types.NetConf, args libipam.AutoAssignArgs, dataInfo string, logger *logrus.Entry) (configMapInfo *coreV1.ConfigMap, err error) {
-        logger.Debugf("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	logger.Debug("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	attrs := args.Attrs
-
-	// utils.ConfigureLogging(conf)
-
-	// logger := logrus.WithFields(logrus.Fields{})
 
 	// Allocate the IP and update/create the endpoint. Do this even if the endpoint already exists and has an IP
 	// allocation. The kubelet will send a DEL call for any old containers and we'll clean up the old IPs then.
 	client, err := NewK8sClient(conf, logger)
 	if err != nil {
-                logger.WithField("err", err).Debug("client erraaaaaaaaa")
+		logger.WithField("err", err).Debug("client erraaaaaaaaa")
 		return nil, err
 	}
-        logger.Debugf("Created Kubernetes client11111")
+	logger.Debug("Created Kubernetes client11111")
 	if conf.Policy.PolicyType == "k8s" {
 		cm, err := createK8sConfigMapInfo(client, attrs[libipam.AttributePod], attrs[libipam.AttributeNamespace], dataInfo)
 		if err != nil {
-                        logger.WithField("err", err).Debug("configmap erraaaaaaaaa")
+			logger.WithField("err", err).Debug("configmap erraaaaaaaaa")
 			return nil, err
 		}
 		return cm, nil
