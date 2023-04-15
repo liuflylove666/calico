@@ -287,18 +287,7 @@ func CmdAddK8s(ctx context.Context, args *skel.CmdArgs, conf types.NetConf, epID
 					if r1.IPs != nil {
 						data1 = r1
 						hasIP = true
-						logger.Debug("result info r1111111:%+v", r1)
-						/// echo addresss info
-						// var ipList []net.IP
-						// for _, ip := range data1.IPs {
-						// 	ipList = append(ipList, ip.Address.IP)
-						// }
-						// ipAddrsStr, err := json.Marshal(ipList)
-						// logger.Debugf("IPs parsed: %v", string(ipAddrsStr))
-
-						// if err != nil {
-						// 	logger.Debug("json Marshall11111 err:%+v", err)
-						// }
+						logrus.Debugf("result info r1111111:%+v", r1)
 					}
 				}
 			}
@@ -332,13 +321,13 @@ func CmdAddK8s(ctx context.Context, args *skel.CmdArgs, conf types.NetConf, epID
 
 		// When ipAddrs annotation is set, we call out to the configured IPAM plugin
 		// requesting the specific IP addresses included in the annotation.
-		logger.Debug("IPAM222222 result set static ip to: %+v", data1)
+		logger.Debugf("IPAM222222 result set static ip to: %+v", data1)
 		// result, err = ipAddrsResult(ipAddrsStaticIp, conf, args, logger)
 		result = data1
 		if err != nil {
 			return nil, err
 		}
-		logger.Debugf("IPAM result set to: %+v", result)
+		logger.Debugf("IPAM23333 result set to: %+v", result)
 	case ipAddrs == "" && ipAddrsNoIpam == "":
 		// Call the IPAM plugin.
 		result, err = utils.AddIPAM(conf, args, logger)
@@ -1001,7 +990,7 @@ func getK8sConfigMapInfo(client *kubernetes.Clientset, podName, podNamespace str
 	if configmapInfo == nil {
 		return nil, err
 	}
-	logrus.Debug("configmap info %+v", configmapInfo)
+	logrus.Debugf("configmap info %+v", configmapInfo)
 	return configmapInfo, err
 }
 
@@ -1028,10 +1017,10 @@ func createK8sConfigMapInfo(client *kubernetes.Clientset, podName string, podNam
 			cm.Data[podName] = dataInfo
 		}
 		configMapInfo, err = client.CoreV1().ConfigMaps(podNamespace).Update(context.Background(), cm, metav1.UpdateOptions{})
-		logrus.Debug("update to configmap info111 %+v", configMapInfo)
+		logrus.Debugf("update to configmap info111 %+v", configMapInfo)
 		return configMapInfo, nil
 	}
-	logrus.Debug("update to configmap infocm %+v", configMapInfo)
+	logrus.Debugf("update to configmap infocm %+v", configMapInfo)
 	return cm, nil
 }
 
@@ -1039,7 +1028,7 @@ func applyK8sConfigMap(client *kubernetes.Clientset, podName string, podNamespac
 
 	configmapInfo, err := getK8sConfigMapInfo(client, podName, podNamespace)
 	if err != nil {
-		logrus.Debug("configmap info nil")
+		logrus.Debugf("configmap info nil")
 		return nil, err
 	}
 	datamap, ok := configmapInfo.Data[podName]
