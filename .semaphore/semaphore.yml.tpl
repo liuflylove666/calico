@@ -69,7 +69,7 @@ global_job_config:
     - mkdir artifacts
     # Semaphore is doing shallow clone on a commit without tags.
     # unshallow it for GIT_VERSION:=$(shell git describe --tags --dirty --always)
-    - git fetch --unshallow
+    - retry git fetch --unshallow
     # Semaphore mounts a copy-on-write FS as /var/lib/docker in order to provide a pre-loaded cache of
     # some images. However, the cache is not useful to us and the copy-on-write FS is a big problem given
     # how much we churn docker containers during the build.  Disable it.
@@ -123,7 +123,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-4
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     prologue:
       commands:
       - cd apiserver
@@ -140,7 +140,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-4
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     prologue:
       commands:
       - cd apiserver
@@ -171,7 +171,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-4
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     jobs:
     - name: "Typha: UT and FV tests"
       commands:
@@ -202,7 +202,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-4
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     prologue:
       commands:
       - cd felix
@@ -239,7 +239,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-4
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     prologue:
       commands:
       - cd felix
@@ -389,7 +389,7 @@ blocks:
       - export GOOGLE_APPLICATION_CREDENTIALS=$HOME/secrets/secret.google-service-account-key.json
       - export SHORT_WORKFLOW_ID=$(echo ${SEMAPHORE_WORKFLOW_ID} | sha256sum | cut -c -8)
       - export ZONE=europe-west3-c
-      - export VM_PREFIX=sem-${SEMAPHORE_PROJECT_NAME}-${SHORT_WORKFLOW_ID}-
+      - export VM_PREFIX=sem-${SEMAPHORE_PROJECT_NAME}-${SHORT_WORKFLOW_ID}-felix-
       - echo VM_PREFIX=${VM_PREFIX}
       - export REPO_NAME=$(basename $(pwd))
       - export NUM_FV_BATCHES=8
@@ -433,7 +433,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-8
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     prologue:
       commands:
       - cd node
@@ -441,14 +441,42 @@ blocks:
     - name: "Node: CI"
       commands:
       - ../.semaphore/run-and-monitor ci.log make ci
-    - name: "Node: k8s-test"
-      commands:
-      - ../.semaphore/run-and-monitor k8s-test.log make k8s-test
     epilogue:
       always:
         commands:
         - test-results publish ./report/nosetests.xml --name "node-ci" || true
-        - test-results publish ./report/k8s-tests.xml --name "node-k8s-test" || true
+
+- name: "Node/kind-cluster tests"
+  run:
+    when: "${FORCE_RUN} or change_in(['/*', '/api/', '/libcalico-go/', '/typha/', '/felix/', '/confd/', '/bird/', '/pod2daemon/', '/node/', '/hack/test/certs/'], {exclude: ['/**/.gitignore', '/**/README.md', '/**/LICENSE']})"
+  dependencies: ["Prerequisites"]
+  task:
+    prologue:
+      commands:
+      - cd node
+      - export GOOGLE_APPLICATION_CREDENTIALS=$HOME/secrets/secret.google-service-account-key.json
+      - export SHORT_WORKFLOW_ID=$(echo ${SEMAPHORE_WORKFLOW_ID} | sha256sum | cut -c -8)
+      - export ZONE=europe-west3-c
+      - export VM_PREFIX=sem-${SEMAPHORE_PROJECT_NAME}-${SHORT_WORKFLOW_ID}-kind-
+      - echo VM_PREFIX=${VM_PREFIX}
+      - export REPO_NAME=$(basename $(pwd))
+      - export VM_DISK_SIZE=80GB
+      - mkdir artifacts
+      - ../.semaphore/vms/create-test-vms ${ZONE} ${VM_PREFIX}
+    jobs:
+    - name: "Node: kind-cluster tests"
+      execution_time_limit:
+        minutes: 120
+      commands:
+      - ../.semaphore/vms/run-tests-on-vms ${ZONE} ${VM_PREFIX}
+    epilogue:
+      always:
+        commands:
+          - ../.semaphore/vms/publish-artifacts
+          - ../.semaphore/vms/clean-up-vms ${ZONE} ${VM_PREFIX}
+          - test-results publish ./report/*.xml --name "node-kind-tests" || true
+    secrets:
+    - name: google-service-account-for-gce
 
 - name: "Node: build all architectures"
   run:
@@ -458,7 +486,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-4
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     prologue:
       commands:
       - cd node
@@ -481,7 +509,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-8
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     jobs:
     - name: "sig-network conformance"
       env_vars:
@@ -498,7 +526,7 @@ blocks:
     agent:
       machine:
         type: e1-standard-4
-        os_image: ubuntu1804
+        os_image: ubuntu2004
     prologue:
       commands:
       - cd kube-controllers
